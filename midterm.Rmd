@@ -1,0 +1,513 @@
+---
+title: 'Midterm Project: Heart Study Data'
+author: "Nathan Kurtz-Enko, Sawyer Jacobsen, Daniel Kindem, Jonathan Trevathan"
+date: "April 7, 2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+##Libraries needed
+library(class)
+library(glmnet)
+library(tidyverse)
+library(MASS)
+library(tree)
+library(foreach)
+library(doParallel)
+```
+
+##Background:
+    One of the most important factors in the health of citizens around the world is heart disease. Through looking at several different predictors, we plan to see what classification problems work the best in determining if a person has heart disease after 10 years.
+
+The data set we are using is the framingham data set. The Framingham Heart Study is an investigation into the set of causes for cardiovascular disease among a population in the community of Framingham, Massachusetts. Much of today’s common knowledge concerning heart disease and the factors associated with it are based off of this study.
+
+##Prediction Question:
+
+What factors are most associated with Ten Year coronary heart disease, and can we create a model that accurately predicts when a patient will contract coronary heart disease.
+
+##Summary:
+
+The models we will be using are Logistic Regression, Lasso, KNN, Decision Trees, and Forward Subset Selection on a Linear Model. For each method, we will using K-Fold Cross Validation to optimize the models and compare error rates with the null rate in order to determine if the method effectively predicts incidences of heart disease. Also, due to the state of our data set, we must clean our data and remove any NA values. Finally, we will conclude by discussing the confusion matrices computed on the predictions of each method, the associated error rates, and determine which method seems to work best for this particular data set.
+
+###Reading in data set
+```{r}
+#loading and cleaning the data
+directory_name = "~/Desktop/ADM/Midterm/"
+file_name = "framingham.csv"
+paste(directory_name, file_name, sep = "")
+framingham = read.csv(paste(directory_name, file_name, sep = ""))
+#removing the NAs
+clean_framingham = na.omit(framingham)
+```
+
+```{r}
+nrow(clean_framingham)
+framingham.df = data.frame(scale(clean_framingham[,-ncol(clean_framingham)]),
+                           TenYearCHD = clean_framingham$TenYearCHD)
+summary(framingham.df)
+
+framingham2.df<-framingham.df
+framingham2.df$TenYearCHD<-as.factor(framingham.df$TenYearCHD)
+
+with(framingham.df, table(TenYearCHD))
+```
+
+```{r}
+#creating train and test data sets
+set.seed(123)
+n = nrow(framingham.df)
+train = sample(1:n, n/2, rep = F)
+train.df = framingham.df[train,]
+test.df = framingham.df[-train,]
+with(test.df, table(TenYearCHD))
+null_rate = 1 - with(test.df, table(TenYearCHD))[1]/nrow(test.df)
+sprintf("The null rate for our test data is %.4f", null_rate)
+```
+
+##KNN
+
+(nathan’s stuff)
+```{r}
+#define k values
+kval_rng <- 2:16
+#rearrange data for knn() and knn.cv()
+train_result <- train.df$TenYearCHD
+knn_train <- train.df[,-1]
+test_result <- test.df$TenYearCHD
+knn_test <- test.df[,-1]
+#create tibble to store errors
+stuff <- tibble(k = kval_rng, err_cv = kval_rng, err_train = kval_rng, err_test = kval_rng)
+for(k in kval_rng){
+  mod.knn <- knn.cv(knn_train, train_result, k)
+  err <- mean(train_result != mod.knn)
+  stuff[k-1, 2] <- err
+  mod.knn <- knn(knn_train, knn_train, train_result, k)
+  err <- mean(train_result != mod.knn)
+  stuff[k-1, 3] <- err
+  mod.knn <- knn(knn_train, knn_test, train_result, k)
+  err <- mean(test_result != mod.knn)
+  stuff[k-1, 4] <- err
+}
+```
+
+```{r}
+#null rate for test data set
+nr_knn <- sum(test.df$TenYearCHD)/nrow(test.df)
+
+ggplot(stuff)+
+  geom_point(aes(x = k, y = err_cv), color = "green")+
+  geom_point(aes(x = k, y = err_train), color = "orange")+
+  geom_point(aes(x = k, y = err_test), color = "blue")+
+  geom_line(aes(x = k, y = err_cv), color = "green")+
+  geom_line(aes(x = k, y = err_train), color = "orange")+
+  geom_line(aes(x = k, y = err_test), color = "blue")+
+  geom_hline(yintercept = nr, linetype = “dashed”)+
+  labs(y = "Error", x = "K Value",
+       title = "Error Rates by K Values",
+       subtitle = "CV (green), Train (orange), Test (blue), Null (black-dashed)")
+
+```
+```{r}
+#best k value
+best_k <- (filter(stuff, err_cv == min(stuff$err_cv)))$k
+#testing model
+test.knn <- knn(knn_train, knn_test, train_result)
+#error
+err_knn <- mean(test_result != test.knn)
+#c(err, nr)
+#confusion matrix
+cm_knn <- table(test.df$TenYearCHD, test.knn)
+#cm
+```
+
+##LASSO and Logistic regression
+
+(Sawyer’s stuff)
+```{r}
+calcTest <- function(thresh.default) {
+ test.df<-test.df %>%
+  mutate(test.lasso.pred= ifelse(lasso.preds< thresh.default,0,1))
+  with(test.df,mean(TenYearCHD!=test.lasso.pred))
+}
+
+calcCV <- function(thresh) {
+ test<-test %>% 
+  mutate(cv.log.pred= ifelse(log.preds< thresh,0,1))
+  with(test,mean(TenYearCHD!=cv.log.pred))
+}
+```
+
+
+```{r}
+#creating matrices for glmnet
+x.train = as.matrix(train.df[,-ncol(train.df)])
+y.train = as.matrix(train.df[,ncol(train.df)])
+x.test = as.matrix(test.df[,-ncol(test.df)])
+y.test = as.matrix(test.df[,ncol(test.df)])
+
+lambda.grid <- 10^seq(-3,1,length=100)
+cv.lasso <-
+   cv.glmnet(x.train,y.train,alpha=1, family = "binomial",
+         intercept=F,lambda=lambda.grid)
+## here's how the mse looks as a function of the log(lambda)
+plot(cv.lasso)
+
+##extract the optimal lambda
+(lambda.opt <- cv.lasso$lambda.min)
+
+mod.lasso <- glmnet(x.train, y.train, alpha=1, family = "binomial",
+         intercept=F, lambda=lambda.opt)
+coef.lasso<- coef(mod.lasso)[-1,1] ##drop intercept
+
+betaVals = mod.lasso$beta
+dim(betaVals)
+
+
+betaNonZero <- betaVals > 0
+
+lasso.preds <- predict(mod.lasso, newx=x.test, type = "response")
+
+threshVals<-seq(0,1,length.out = 101)
+err.preds<-map_dbl(threshVals, calcTest)
+plot(threshVals,err.preds)
+
+err.test = min(err.preds)
+id.min<-which.min(err.preds)
+mod1thresh = threshVals[id.min]
+
+test.df<-test.df %>%
+  mutate(test.lasso.preds=ifelse(lasso.preds<threshVals[id.min],0,1))
+
+with(test.df, table(TenYearCHD, test.lasso.preds))
+(err.lasso.test <- with(test.df, mean(TenYearCHD != test.lasso.preds)))
+
+varNames<-row.names(betaVals)
+(vars<-varNames[betaNonZero[,1]])
+```
+
+```{r}
+log.data = train.df %>%
+  dplyr::select(vars, TenYearCHD)
+
+mod.log = glm(TenYearCHD ~ ., data = log.data, family = binomial)
+
+nfolds = 10
+folds = sample(1:nfolds, nrow(log.data), rep = T)
+errCV = numeric(nfolds)
+threshhold = numeric(nfolds)
+for(fold in 1:nfolds){
+  train = log.data[folds != fold,]
+  test = log.data[folds == fold,]
+  mod.log = glm(TenYearCHD ~ ., data = train, family = binomial)
+  log.preds = predict(mod.log, newdata = test, type = "response")
+  err.preds = map_dbl(threshVals, calcCV)
+  errCV[fold] = min(err.preds)
+  threshhold[fold] = which.min(err.preds)
+}
+mean(errCV)
+mean(threshhold)
+
+thresh = threshhold[which.min(errCV)]*.01
+
+test.data = test.df %>%
+  dplyr::select(vars, TenYearCHD)
+
+mod.log1 = glm(TenYearCHD ~ ., data = log.data, family = binomial)
+log.preds = predict(mod.log1, newdata = test.data, type = "response")
+test.data$log.pred = ifelse(log.preds < thresh, 0, 1)
+(err.log.test = with(test.data, mean(TenYearCHD != log.pred)))
+with(test.data, table(TenYearCHD, log.pred))
+```
+
+
+##Decision Tree Evaluation (Daniel’s Stuff)
+
+```{r}
+max.tree <- tree(TenYearCHD~.,
+              data=framingham.df,
+              control=tree.control(nobs=nrow(framingham.df),
+                                   mindev=0.00000000001))
+plot(max.tree)
+text(max.tree,pretty=0)
+tree.cv <- cv.tree(max.tree)
+plot(tree.cv$size,tree.cv$dev,type='l')
+```
+```{r,warning=FALSE}
+(numLeaves <- sum(max.tree$frame$var =="<leaf>"))
+
+numFolds <- 5
+folds <- sample(1:numFolds,nrow(framingham.df),rep=T)
+
+err <- matrix(nrow=numLeaves,ncol=3)
+errCV <- numeric(numFolds)
+
+for(treeSize in numLeaves:2){
+    #print(treeSize)
+    tree.prune <- prune.tree(max.tree,best=treeSize)
+    preds.Train <- predict(tree.prune,newdata=train.df)
+    preds.Test <- predict(tree.prune,newdata=test.df)
+    errTrain <- with(train.df,mean(TenYearCHD != preds.Train))
+    errTest <- with(test.df,mean(TenYearCHD != preds.Test))
+
+    ##Cross validate:
+    for(fold in 1:numFolds){
+        TrainTrain.df <- framingham.df[fold != folds,]
+        TrainTest.df <- framingham.df[fold == folds,]
+        tree.cv <- tree(TenYearCHD~.,data=TrainTrain.df,
+                          control=tree.control(nrow(TrainTrain.df),mindev=0.0001))
+        tree.cv.prune <- prune.tree(tree.cv,best=treeSize)
+        preds <- predict(tree.cv.prune,newdata=TrainTest.df)
+        errCV[fold] <- with(TrainTest.df,mean(TenYearCHD != preds))
+    }
+    err[treeSize,] <- c(errTrain,errTest,mean(errCV))
+}
+err
+```
+
+```{r}
+data.frame(treeSize=2:numLeaves,
+           train=err[-1,1],
+           test=err[-1,2],           
+           cv=err[-1,3]) %>%
+    gather(type,val,train:cv) %>% 
+    ggplot()+
+    geom_point(aes(treeSize,val,color=type),size=1)+
+    geom_line(aes(treeSize,val,color=type))+    
+    scale_color_manual(values=c("red","blue","black"))
+```
+
+```{r}
+#IMPORTANT: make sure TenYearCHD is a factor before making trees
+max_tree <- tree(TenYearCHD~.,
+              data=train.df,
+              control=tree.control(nobs=nrow(framingham.df),
+                                   minsize = 1))
+
+max_tree_cv <- cv.tree(max_tree)
+plot(max_tree_cv)
+best_size <- (max_tree_cv$size)[(which(max_tree_cv$dev == min(max_tree_cv$dev)))]
+pruned_tree <- prune.tree(max_tree, best = best_size)
+test_preds <- predict(pruned_tree, newdata = test.df)
+test_preds2 <- numeric(length(test_preds)/2)
+for(i in 1:(length(test_preds)/2)){
+  test_preds2[i] <- ifelse(test_preds[i,1] > .5, 0, 1)
+}
+err <- mean(test_preds2 != test.df$TenYearCHD)
+err
+nr <- sum(test.df$TenYearCHD == 1)/(n/2)
+nr
+```
+
+```{r}
+#probably ignore this
+#IMPORTANT: if you don’t change to factor and find mse instead of error rate then you get 13%
+max_tree <- tree(TenYearCHD~.,
+              data=train.df,
+              control=tree.control(nobs=nrow(train.df),
+                                   minsize = 1))
+max_tree_cv <- cv.tree(max_tree)
+plot(max_tree_cv)
+best_size <- (max_tree_cv$size)[(which(max_tree_cv$dev == min(max_tree_cv$dev)))]
+pruned_tree <- prune.tree(max_tree, best = best_size)
+test_preds <- predict(pruned_tree, newdata = test.df)
+#test_preds2 <- numeric(length(test_preds)/2)
+#for(i in 1:(length(test_preds)/2)){
+#  test_preds2[i] <- ifelse(test_preds[i,1] > .5, 0, 1)
+#}
+err <- mean((test_preds - test.df$TenYearCHD)^2)
+err
+nr <- sum(test.df$TenYearCHD == 1)/(n/2)
+nr
+```
+
+
+(Jonathan’s stuff)
+##Determine Best Predictors: Linear Regression
+
+###Setup
+
+####Calculate Thresh Error
+```{r}
+calcErr <- function(thresh) {
+  pred = ifelse(test.df$vals < thresh,0,1)
+  mean(test.df$TenYearCHD != pred)
+}
+```
+
+
+####Kfold CV Function
+```{r}
+mseCV <- function(data.df,kfolds=10){
+  threshVals<-seq(0,1,length.out = 100)
+  sampleSize <- nrow(data.df)
+  folds <- sample(1:kfolds,sampleSize,rep=T)
+    #mse <- rep(0,kfolds)
+  mse=foreach(k = 1:kfolds, .combine=cbind) %dopar% {
+    
+calcErr <- function(thresh) {
+  pred = ifelse(test.df$vals < thresh,0,1)
+  mean(test.df$TenYearCHD != pred)
+}
+
+    library(purrr)
+      train.df <- data.df[folds !=k,]
+      test.df <- data.df[folds==k,]
+      mod <- lm(TenYearCHD~.,data=train.df)
+      test.df$vals <- predict(mod,newdata=test.df)
+      err.preds<-map_dbl(threshVals,calcErr)
+      min(err.preds)
+    }
+  mean(mse)
+}
+```
+
+####Bootstrap CV Function
+```{r}
+mseBoot <- function(data.df,M=50){
+  sampleSize <- nrow(data.df)
+  threshVals<-seq(0,1,length.out = 100)
+  #mse <- rep(0,M)
+  mse=foreach(m = 1:M, .combine=cbind) %dopar% {
+
+calcErr <- function(thresh) {
+  pred = ifelse(test.df$vals < thresh,0,1)
+  mean(test.df$TenYearCHD != pred)
+}
+
+    library(purrr)
+      bootSamp <- sample(1:sampleSize,sampleSize,rep=T)
+      outOfBag <- setdiff(1:sampleSize,bootSamp)
+      train.df <- data.df[bootSamp,]
+      test.df <-   data.df[outOfBag,]
+      mod <- lm(TenYearCHD~.,data=train.df)
+      test.df$vals <- predict(mod,newdata=test.df)
+      err.preds<-map_dbl(threshVals,calcErr)
+      min(err.preds)
+  }
+  mean(mse)
+}
+```
+
+###Setup For Main Loop
+The last field is the response variable in this case
+```{r}
+numPreds <- length(names(train.df))-1
+(allPreds <- 1:(numPreds))
+currPreds <- c()
+availPreds <- setdiff(allPreds,currPreds)
+maxPreds <- numPreds
+minMSE <- numeric(maxPreds)
+nr <- sum(framingham.df$TenYearCHD)/nrow(framingham.df)
+```
+
+###Main Loop
+
+```{r,warning = FALSE}
+currPreds <- c()
+availPreds <- setdiff(allPreds,currPreds)
+maxPreds <- numPreds
+minMSE <- numeric(maxPreds)
+cores=detectCores()-1 #not to overload your computer
+cl <- makeCluster(cores)
+registerDoParallel(cl)
+
+tot <- 0
+while( tot < maxPreds){
+    ##add predictor which decreases MSE (as determined by CV or
+    ##Bootstrapping)
+    ## The MSEs computed as we add each of the available predictors
+    allMSE <- numeric(length(availPreds))
+    ct<-1
+    for(id in availPreds){
+        #library(foreach)
+        data2.df <- framingham.df[,c(currPreds,id,numPreds+1)]
+        mse <- (mseCV(data2.df)+mseBoot(data2.df))/2
+        allMSE[ct]<-mse
+        ct<-ct+1
+    }
+    ##Find the min
+    id <- which.min(allMSE)
+    ##get the best predictor and MSW
+    bestPred <- availPreds[id]
+    bestMSE <- min(allMSE)
+    ##Add these into the collection
+    currPreds <- c(currPreds,bestPred)
+    tot <-tot+1
+    minMSE[tot] <- bestMSE
+    availPreds <- setdiff(allPreds,currPreds)
+    ## Print stuff out for debugging and attention-grabbing
+    print(sprintf("Predictor Added: %s: %s  MeanError Value: %s",bestPred,
+                  colnames(framingham.df[bestPred]),bestMSE))
+    print(currPreds)
+}
+stopCluster(cl)
+```
+
+### Plot
+```{r}
+forplot.df<-data.frame(pred=1:maxPreds,meanError=minMSE,
+                       nullRate=numeric(length(maxPreds))+nr)
+forplot<-forplot.df %>%
+    ggplot()+
+    geom_point(aes(pred,meanError),color="red")+
+    geom_line(aes(pred,nullRate),color="black")
+forplot
+```
+```{r}
+descr <- colnames(framingham.df[currPreds])
+diffMSE <- c(0,minMSE[-length(minMSE)]-minMSE[-1])
+head(diffMSE)
+result.df <- data.frame(id=1:length(descr),descr,minMSE,diffMSE=-10*diffMSE)
+result.df <- result.df%>%
+    mutate(descr=factor(descr,levels=rev(descr)))
+```
+
+```{r}
+ggplot(result.df,
+    aes(descr,minMSE))+
+    geom_bar(stat="identity",fill="blue")+
+    coord_flip(ylim=c(min(minMSE)*.975,max(minMSE)))+
+    ggtitle("Subset Selection: MSE Decrease")
+```
+```{r}
+ggplot(result.df,aes(descr,diffMSE))+
+    geom_bar(stat="identity",fill="red")+
+    coord_flip()+
+    ggtitle("Subset Selection: MSE Chage")
+```
+
+
+##Results
+
+###KNN
+
+```{r, echo = FALSE}
+cm_knn
+```
+The confusion matrix for knn says that the model correctly predicted `r cm[1,1]` instances in which a patient did not develop heart disease and `r cm[2,2]` instances in which a patient did develop heart disease. It only incorrectly predicted `r cm[2,1]` instances of patients not developing heart disease and `r cm[1,2]` instances of patients developing heart disease. The null rate for the test data set for KNN is `r nr` and the error rate of the KNN model using `r best_k` k-values, which was calculated to be the best number of k-values by cross-validating, is `r err_knn`.
+
+###Lasso and Logistic Regression
+
+```{r, echo = FALSE}
+table(test.data$TenYearCHD, log.pred)
+```
+
+###Decision Tree
+###Conclusion
+
+```{r, echo = FALSE}
+errs<- c(err_knn, err.log.test , min(err[-1,2]), min(minMSE))
+Methods <- c(“KNN”, “LASSO and Logistic Regression”, “Decision Tree”, “Forward Selection on Linear Model”)
+best_err <- errs[1]
+for(i in 1:(length(errs)-1)){
+  if(best_err > errs[i+1]){
+    best_err <- errs[i+1]
+  }
+}
+
+Best_meth <- Methods[(which(errs == best_err))]
+```
+
+Based on our work and calculated errors, we found that for this particular data set the best method to use in order to accurately predict instances of heart disease is `r Best_meth` with an error rate of `r best_err`.
